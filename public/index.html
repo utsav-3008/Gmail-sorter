@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gmail Sorter</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f4f6fb;
+      color: #1c2333;
+      font: 16px/1.5 system-ui, sans-serif;
+    }
+    main { max-width: 800px; margin: 48px auto; padding: 0 20px; }
+    h1 { margin-bottom: 4px; }
+    h2 { font-size: 20px; }
+    .muted, small { color: #657086; }
+    .card {
+      background: white;
+      padding: 24px;
+      margin: 20px 0;
+      border: 1px solid #e1e6ef;
+      border-radius: 14px;
+    }
+    label.field { display: block; font-weight: 600; margin-top: 18px; }
+    input[type="text"] {
+      width: 100%;
+      padding: 12px;
+      margin: 6px 0;
+      border: 1px solid #cbd3df;
+      border-radius: 8px;
+      font: inherit;
+    }
+    .check { display: block; margin: 14px 0; }
+    button, .button {
+      display: inline-block;
+      padding: 11px 17px;
+      border: 0;
+      border-radius: 8px;
+      background: #315ce8;
+      color: white;
+      font: inherit;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    button.secondary { background: #e9edf6; color: #23304b; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+    .message { padding: 13px 0; border-bottom: 1px solid #edf0f5; }
+    .message div { overflow-wrap: anywhere; }
+    #notice { white-space: pre-wrap; overflow-wrap: anywhere; }
+    code { background: #edf1f8; padding: 2px 5px; border-radius: 4px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Gmail Sorter</h1>
+  <p class="muted">Turn your sorting rules into Gmail labels and filters.</p>
+
+  <section class="card">
+    <p id="connection">Checking connection…</p>
+    <a id="connect" class="button" href="/auth/google" hidden>
+      Connect Gmail
+    </a>
+    <button id="logout" class="secondary" hidden>Sign out of app</button>
+  </section>
+
+  <section id="editor" class="card" hidden>
+    <h2>Create a sorting rule</h2>
+
+    <form id="ruleForm">
+      <label class="field" for="query">Which emails should match?</label>
+      <input
+        id="query"
+        type="text"
+        required
+        maxlength="2000"
+        placeholder="from:billing@example.com subject:invoice"
+      >
+      <small>
+        Use Gmail search syntax. Examples:
+        <code>from:example.com</code>,
+        <code>subject:invoice</code>,
+        <code>has:attachment</code>.
+      </small>
+
+      <label class="field" for="label">Destination label</label>
+      <input
+        id="label"
+        type="text"
+        required
+        maxlength="100"
+        placeholder="Finance/Invoices"
+      >
+      <small>A custom Gmail label will be created if it does not exist.</small>
+
+      <label class="check">
+        <input id="archive" type="checkbox">
+        Remove matching emails from Inbox
+      </label>
+
+      <label class="check">
+        <input id="existing" type="checkbox" checked>
+        Apply to existing emails
+      </label>
+
+      <label class="check">
+        <input id="future" type="checkbox" checked>
+        Automatically sort future incoming emails
+      </label>
+
+      <small>
+        Future-mail filters are managed by Gmail. Avoid time-dependent or
+        mailbox-state searches when you want a lasting incoming-mail rule.
+      </small>
+
+      <div class="actions">
+        <button id="previewButton" type="submit">Preview matches</button>
+        <button id="applyButton" type="button" disabled>Apply rule</button>
+      </div>
+    </form>
+  </section>
+
+  <section id="preview" class="card" hidden>
+    <h2>Preview</h2>
+    <p id="matchCount" class="muted"></p>
+    <div id="messages"></div>
+  </section>
+
+  <section class="card">
+    <h2>Status</h2>
+    <div id="notice" role="status" aria-live="polite">
+      Connect Gmail to get started.
+    </div>
+  </section>
+
+  <p class="muted">
+    This starter changes individual matching messages, not necessarily entire
+    conversations. It does not delete emails or provide automatic undo.
+  </p>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let previewedRule = null;
+  let busy = false;
+
+  function readRule() {
+    return {
+      query: $("query").value.trim(),
+      label: $("label").value.trim(),
+      archive: $("archive").checked,
+      existing: $("existing").checked,
+      future: $("future").checked
+    };
+  }
+
+  function notice(message) {
+    $("notice").textContent = message;
+  }
+
+  function setBusy(value) {
+    busy = value;
+    for (const control of $("ruleForm").elements) {
+      control.disabled = value;
+    }
+    $("applyButton").disabled = value || !previewedRule;
+    $("logout").disabled = value;
+  }
+
+  async function api(url, options = {}) {
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...options.headers
+      }
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Request failed.");
+    return data;
+  }
+
+  async function loadStatus() {
+    try {
+      const { connected } = await api("/api/status");
+      $("connection").textContent = connected
+        ? "Gmail connected."
+        : "No Gmail account connected.";
+
+      $("connect").hidden = connected;
+      $("logout").hidden = !connected;
+      $("editor").hidden = !connected;
+
+      if (connected) notice("Create a rule and preview its matches.");
+    } catch (error) {
+      notice(error.message);
+    }
+  }
+
+  $("ruleForm").addEventListener("input", () => {
+    previewedRule = null;
+    $("applyButton").disabled = true;
+    $("preview").hidden = true;
+  });
+
+  $("ruleForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (busy) return;
+
+    previewedRule = null;
+    setBusy(true);
+    notice("Finding matching emails…");
+
+    try {
+      const rule = readRule();
+      const result = await api("/api/preview", {
+        method: "POST",
+        body: JSON.stringify(rule)
+      });
+
+      $("messages").replaceChildren();
+      $("matchCount").textContent =
+        `Gmail estimates ${result.estimatedMatches} matches. ` +
+        `Showing up to 10. Spam and Trash are excluded by default.`;
+
+      for (const message of result.messages) {
+        const row = document.createElement("div");
+        row.className = "message";
+
+        const title = document.createElement("strong");
+        title.textContent = message.subject;
+
+        const details = document.createElement("div");
+        details.className = "muted";
+        details.textContent = `${message.from} — ${message.date}`;
+
+        row.append(title, details);
+        $("messages").append(row);
+      }
+
+      if (!result.messages.length) {
+        $("messages").textContent = "No existing matching messages found.";
+      }
+
+      previewedRule = JSON.stringify(rule);
+      $("preview").hidden = false;
+      notice("Preview ready. Review the matches before applying.");
+    } catch (error) {
+      notice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  $("applyButton").addEventListener("click", async () => {
+    const rule = readRule();
+
+    if (JSON.stringify(rule) !== previewedRule) {
+      notice("Preview the current rule first.");
+      return;
+    }
+
+    const summary = [
+      `Destination: ${rule.label}`,
+      `Existing emails: ${rule.existing ? "Yes" : "No"}`,
+      `Future incoming emails: ${rule.future ? "Yes" : "No"}`,
+      `Remove from Inbox: ${rule.archive ? "Yes" : "No"}`,
+      "",
+      "Changes are not automatically reversible. Continue?"
+    ].join("\n");
+
+    if (!confirm(summary)) return;
+
+    setBusy(true);
+    notice("Starting sorting job…");
+
+    try {
+      const { jobId } = await api("/api/apply", {
+        method: "POST",
+        body: JSON.stringify(rule)
+      });
+
+      while (true) {
+        const job = await api(`/api/jobs/${jobId}`);
+
+        notice(
+          `${job.stage}\n` +
+          `Found: ${job.found}\n` +
+          `Updated: ${job.processed} / ${job.total}\n` +
+          (job.filterId ? "Future-mail filter is active.\n" : "") +
+          (job.error
+            ? `Error: ${job.error}\nEarlier changes may already have applied.`
+            : "")
+        );
+
+        if (["done", "error"].includes(job.status)) break;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    } catch (error) {
+      notice(
+        `${error.message}\n` +
+        "If sorting already started, it may still be running. " +
+        "Check Gmail before trying again."
+      );
+    } finally {
+      previewedRule = null;
+      setBusy(false);
+    }
+  });
+
+  $("logout").addEventListener("click", async () => {
+    try {
+      await api("/api/logout", { method: "POST" });
+      location.reload();
+    } catch (error) {
+      notice(error.message);
+    }
+  });
+
+  loadStatus();
+</script>
+</body>
+</html>
